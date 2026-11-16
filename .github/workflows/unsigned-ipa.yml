@@ -1,0 +1,78 @@
+# Builds the Jetlink iPhone app as an UNSIGNED .ipa, for sideloading with a
+# tool such as Sideloadly, which signs it with your own Apple ID on install.
+#
+# Put this file in your fork at .github/workflows/unsigned-ipa.yml, then run it
+# from Actions > "Unsigned iPhone .ipa" > Run workflow. When it finishes, the
+# .ipa is under "Artifacts" on the run's page (Jetlink-unsigned-ipa).
+#
+# No secrets and no Apple account are needed here: signing is switched off,
+# so the app's entitlements (the increased memory limit) are not embedded;
+# whatever signs it later decides which entitlements it gets.
+name: Unsigned iPhone .ipa
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ipa:
+    name: Build unsigned .ipa
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # the build number is the commit count, as upstream
+
+      - name: Select Xcode
+        uses: ./.github/actions/select-xcode
+
+      - name: Install xcodegen
+        run: brew install xcodegen
+
+      - name: Regenerate the Xcode project
+        run: make -C ios project
+
+      - name: Read the version
+        run: |
+          VERSION="$(sed -n -E "s/^__version__[[:space:]]*=[[:space:]]*['\"]([^'\"]+)['\"].*/\1/p" jetlink/__init__.py | head -n 1)"
+          [ -n "$VERSION" ] || VERSION=0.0.0
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "BUILD_NUMBER=$(git rev-list --count HEAD)" >> "$GITHUB_ENV"
+          echo "Building Jetlink $VERSION ($(git rev-list --count HEAD))"
+
+      - name: Build the app for iPhone without signing
+        run: |
+          xcodebuild build \
+            -project ios/Jetlink.xcodeproj \
+            -scheme Jetlink \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath ios/build/DerivedData \
+            "MARKETING_VERSION=$VERSION" \
+            "CURRENT_PROJECT_VERSION=$BUILD_NUMBER" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY=""
+
+      - name: Package the .ipa
+        run: |
+          APP="ios/build/DerivedData/Build/Products/Release-iphoneos/Jetlink.app"
+          [ -d "$APP" ] || { echo "error: no app at $APP" >&2; exit 1; }
+          mkdir -p ios/build/ipa/Payload
+          cp -R "$APP" ios/build/ipa/Payload/
+          cd ios/build/ipa
+          zip -qry "Jetlink-$VERSION-unsigned.ipa" Payload
+          ls -lh "Jetlink-$VERSION-unsigned.ipa"
+          shasum -a 256 "Jetlink-$VERSION-unsigned.ipa"
+
+      - name: Upload the .ipa
+        uses: actions/upload-artifact@v4
+        with:
+          name: Jetlink-unsigned-ipa
+          path: ios/build/ipa/*.ipa
+          retention-days: 14
+          compression-level: 0 # an .ipa is already a zip
